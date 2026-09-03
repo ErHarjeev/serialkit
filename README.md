@@ -20,7 +20,7 @@ rules and the same transfer and buffer windows. Only pyserial is needed.
 - **XMODEM** — 128-byte CRC or 1K blocks, from a window with progress
   and abort, or straight from the command line.
 - **Command buffers** — editable slots you can fire at the device,
-  fifteen by default and up to 30.
+  fifteen by default and up to 50.
 - **Reconnect** — a device reset or power cycle does not end the session
   or lose the log; the port is waited for and picked up again.
 - **Timestamps**, log saving, and a settings file for your usual setup.
@@ -208,10 +208,19 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   | `Ctrl+Y` | Typed text colour on/off |
   | `Ctrl+O` | Flag mode: toggle as many as you like — see below |
   | `Ctrl+G` | The key list |
+  | `Ctrl+C` | Sent to the device — it does not quit |
   | `ESC` / `Ctrl+C` | Abort a running transfer |
 
   Not Ctrl+H: that byte is what Backspace sends through `msvcrt` on
   Windows, so binding it would cost you Backspace.
+
+  `Ctrl+]` is the only way out. `Ctrl+C` is a `\x03` byte on its way to
+  the device, so it breaks whatever is running *there* — the shell on
+  the target, not this terminal. On POSIX raw mode already does that;
+  on Windows the console is asked to hand the key over by clearing
+  `ENABLE_PROCESSED_INPUT` while the terminal is running, and the
+  original mode is put back on exit and while a prompt (`Ctrl+T`'s file
+  name, for one) is open, where `Ctrl+C` means "drop this question".
 - **Ctrl+O** prints the flags with their current state and stays open,
   so a run such as `Ctrl+O` `t` `d` `i` `Enter` flips three of them in
   one go. Every key is a flag while the mode is open — `Enter` or `ESC`
@@ -321,7 +330,7 @@ the same window: editable fields numbered from 1, each with a **Send**
 button. Enter in a field sends that slot.
 
 A **Slot** box at the bottom with **-** and **+** next to it changes the
-slot count, between 1 and 30. Type a slot number and **-** removes that
+slot count, between 1 and 50. Type a slot number and **-** removes that
 slot while **+** puts a new empty one after it; with the box empty they
 work on the end of the list. Either way the new count is written to the
 buffer file straight away, so the window opens with the slots you left

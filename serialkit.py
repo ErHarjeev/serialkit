@@ -2807,6 +2807,50 @@ def enable_windows_vt():
         pass
 
 
+# With this flag set the Windows console eats Ctrl+C itself and raises
+# it as a signal. Clearing it hands the key over as a plain \x03 byte.
+ENABLE_PROCESSED_INPUT = 0x0001
+
+
+def windows_console_input():
+    """Handle and current mode of the console input buffer."""
+
+    if os.name != "nt":
+        return None, None
+
+    try:
+
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)
+
+        mode = ctypes.c_uint32()
+
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return None, None
+
+        return handle, mode.value
+
+    except Exception:
+        return None, None
+
+
+def set_windows_console_mode(handle, mode):
+
+    if os.name != "nt" or handle is None or mode is None:
+        return False
+
+    try:
+
+        import ctypes
+
+        return bool(ctypes.windll.kernel32.SetConsoleMode(handle, mode))
+
+    except Exception:
+        return False
+
+
 # ============================================================
 # XMODEM sender (CRC-128 and 1K)
 # ============================================================
@@ -4120,7 +4164,7 @@ def save_config(config, path=CONFIG_FILE):
 # remove slots, and what it saves is what the next session loads.
 BUFFER_COUNT = 15
 BUFFER_MIN = 1
-BUFFER_MAX = 30
+BUFFER_MAX = 50
 
 BUFFER_FILE = os.path.join(
     os.path.expanduser("~"),
@@ -4961,6 +5005,11 @@ class SerialCli:
         self.raw_fd = None
         self.raw_saved = None
 
+        # Set by the Windows key loop, same idea: the console mode as we
+        # found it, so prompts and exit can put it back
+        self.console_handle = None
+        self.console_saved = None
+
         # Kept so the toggle can put it back
         self.configured_input_color = input_color if color else None
         self.input_color = self.configured_input_color
@@ -5283,6 +5332,10 @@ class SerialCli:
                 self.raw_saved
             )
 
+        # A prompt is ours, not the device's, so Ctrl+C goes back to
+        # meaning "give up on this question" while it is open.
+        self.release_console()
+
         try:
 
             sys.stdout.write("\r\x1b[2K" + prompt)
@@ -5303,6 +5356,8 @@ class SerialCli:
                 import tty
 
                 tty.setraw(self.raw_fd)
+
+            self.hold_console()
 
     def prompt_transfer(self):
 
@@ -5368,6 +5423,7 @@ class SerialCli:
             "           e Local echo, r Reconnect, w write settings,",
             "           Enter or ESC leaves",
             "  Ctrl+G   this list",
+            "  Ctrl+C   goes to the device, it does not quit",
             "  ESC or Ctrl+C aborts a running transfer",
             "--- this session (letter = the Ctrl+O key) ---",
             f"  port                {self.port} @ {self.baud} 8N1",
@@ -5824,7 +5880,8 @@ class SerialCli:
 
         self.write_notice(
             f"--- Connected to {self.port} @ {self.baud} 8N1 "
-            f"(Ctrl+G for the key list, Ctrl+] to quit) ---"
+            f"(Ctrl+G for the key list, Ctrl+] to quit, "
+            f"Ctrl+C goes to the device) ---"
         )
 
         # A named buffer file that is not there yet is made now, so
@@ -6020,35 +6077,80 @@ class SerialCli:
 
         self.send_path = None
 
+    def take_console(self):
+        """
+        Stop the Windows console from acting on Ctrl+C.
+
+        Ctrl+C belongs to the device: a target shell wants it to break
+        whatever is running there. With ENABLE_PROCESSED_INPUT cleared
+        the console stops raising it as a signal and delivers it as a
+        plain \x03 byte, like every other key, so Ctrl+] is the only
+        way out of the terminal. This is the counterpart of the raw
+        mode the POSIX loop sets with tty.setraw.
+        """
+
+        self.console_handle, self.console_saved = windows_console_input()
+
+        self.hold_console()
+
+    def hold_console(self):
+
+        if self.console_saved is None:
+            return
+
+        set_windows_console_mode(
+            self.console_handle,
+            self.console_saved & ~ENABLE_PROCESSED_INPUT
+        )
+
+    def release_console(self):
+        """Put the console mode back, so Ctrl+C works at a prompt again."""
+
+        if self.console_saved is None:
+            return
+
+        set_windows_console_mode(self.console_handle, self.console_saved)
+
     def key_loop_windows(self):
 
         import msvcrt
 
-        self.start_pending_send()
+        self.take_console()
 
-        while self.running:
+        try:
 
-            if not msvcrt.kbhit():
-                time.sleep(0.01)
-                continue
+            self.start_pending_send()
 
-            char = msvcrt.getwch()
+            while self.running:
 
-            # Arrow, function and navigation keys arrive as a prefix
-            # plus a code; map the ones a terminal would send.
-            if char in ("\x00", "\xe0"):
+                if not msvcrt.kbhit():
+                    time.sleep(0.01)
+                    continue
 
-                code = msvcrt.getwch()
+                char = msvcrt.getwch()
 
-                sequence = WINDOWS_SPECIAL_KEYS.get(code)
+                # Arrow, function and navigation keys arrive as a prefix
+                # plus a code; map the ones a terminal would send.
+                if char in ("\x00", "\xe0"):
 
-                if sequence and not self.handle_input(sequence):
+                    code = msvcrt.getwch()
+
+                    sequence = WINDOWS_SPECIAL_KEYS.get(code)
+
+                    if sequence and not self.handle_input(sequence):
+                        break
+
+                    continue
+
+                if not self.handle_input(char):
                     break
 
-                continue
+        finally:
 
-            if not self.handle_input(char):
-                break
+            self.release_console()
+
+            self.console_handle = None
+            self.console_saved = None
 
     def key_loop_posix(self):
 
