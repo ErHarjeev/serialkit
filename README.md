@@ -36,9 +36,10 @@ terminal emulation, the XMODEM sender, the windows — is in the script
 itself; nothing shells out to PuTTY, TeraTerm or `sx`.
 
 tkinter is needed for the GUI and for the XMODEM, Buffers and rule
-windows. The CLI runs without it: transfers and buffers fall back to
-terminal prompts, and the rule window says to edit `rules` in the
-settings file instead.
+windows. The CLI runs without it: transfers fall back to terminal
+prompts, and the rule window says to edit `rules` in the settings file
+instead. Buffers are managed from the terminal on Linux whether or not
+tkinter is there.
 
 Runs the same on Windows and Linux:
 
@@ -87,7 +88,10 @@ for a machine with no tkinter, and for scripting a transfer with
 | `--no-highlight` | Leave the rules off, keeping device colours and the input colour (CLI only) |
 | `--reconnect` | Wait for the port and carry on when the device is reset or power cycled (default, CLI only) |
 | `--no-reconnect` | End the session as soon as the port is lost (CLI only) |
-| `--text-transfer` | Run XMODEM as terminal prompts instead of opening the transfer window (CLI only) |
+| `--dialogs {auto,gui,cli}` | Front end for both the buffers and XMODEM: windows, terminal prompts, or `auto` — a window on Windows, a prompt on Linux (CLI only) |
+| `--buffer-ui {auto,gui,cli}` | Front end for Ctrl+B alone, default `auto` (CLI only) |
+| `--transfer-ui {auto,gui,cli}` | Front end for Ctrl+T and `--send` alone, default `auto` (CLI only) |
+| `--text-transfer` | The older spelling of `--transfer-ui cli` (CLI only) |
 | `--config FILE` | Settings file to read, default `~/.serialkit.json` |
 | `--no-config` | Ignore the settings file, use built-in defaults |
 | `--save-config` | Write the settings in force to the file, then carry on |
@@ -114,6 +118,7 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
 ```json
 {
   "baud": 921600,
+  "buffer_ui": "auto",
   "buffers": null,
   "color": true,
   "device_colors": false,
@@ -135,6 +140,7 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   ],
   "text_transfer": false,
   "timestamp": true,
+  "transfer_ui": "auto",
   "xmodem": "1k"
 }
 ```
@@ -160,6 +166,14 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   `~/.serialkit_buffers.json`; `--buffers FILE` overrides it for a run.
   Only the path lives here: the slots, their count and the window's
   toggles all live in that file.
+- `buffer_ui` and `transfer_ui` say whether Ctrl+B and Ctrl+T put up a
+  window or ask in the terminal: `gui`, `cli`, or `auto` for a window
+  on Windows and a prompt on Linux. `--dialogs NAME` sets both for a
+  run, `--buffer-ui` and `--transfer-ui` set one each, and `Ctrl+O` `b`
+  and `x` flip them mid-session. Without tkinter the prompts are used
+  whatever these say. `text_transfer` was the older way of writing
+  `"transfer_ui": "cli"` and is still read; `--save-config` writes the
+  two keys above instead.
 - `reconnect` keeps a session alive across a device reset or power
   cycle. `--no-reconnect` starts with it off, `Ctrl+O` `r` flips it in a
   CLI session, and the GUI has a **Reconnect** checkbox in the
@@ -187,6 +201,8 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
     Typed text      i   [on] #7fd1ff
     Local echo      e   [off]
     Reconnect       r   [on]
+    Buffers         b   [auto/gui]
+    XMODEM          x   [auto/gui]
     XMODEM blocks       1K
     Highlight rules     11 active (extended profile)
     settings            C:\Users\you\.serialkit.json
@@ -202,11 +218,11 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   | Key | Does |
   | --- | --- |
   | `Ctrl+]` | Quit |
-  | `Ctrl+T` | Send a file with XMODEM |
-  | `Ctrl+B` | Command buffers |
+  | `Ctrl+T` | Send a file with XMODEM — a window or a prompt, see `--transfer-ui` |
+  | `Ctrl+B` | Command buffers — a window or a prompt, see `--buffer-ui` |
   | `Ctrl+R` | Highlight rules |
   | `Ctrl+Y` | Typed text colour on/off |
-  | `Ctrl+O` | Flag mode: toggle as many as you like — see below |
+  | `Ctrl+O` | Flag mode: toggle as many as you like, `b` and `x` among them — see below |
   | `Ctrl+G` | The key list |
   | `Ctrl+C` | Sent to the device — it does not quit |
   | `ESC` / `Ctrl+C` | Abort a running transfer |
@@ -225,7 +241,8 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   so a run such as `Ctrl+O` `t` `d` `i` `Enter` flips three of them in
   one go. Every key is a flag while the mode is open — `Enter` or `ESC`
   closes it and hands the keyboard back to the device. Each flip prints
-  a one line summary: `t[on]  d[off]  i[off]  c[on]  e[on]  r[on]`.
+  a one line summary:
+  `t[on]  d[off]  i[off]  c[on]  e[on]  r[on]  b[auto/gui]  x[cli]`.
   Everything a command line flag sets can be changed without restarting:
 
   | Key | Flips | GUI equivalent |
@@ -236,12 +253,21 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   | `c` | **Regex highlight**, the rules only — Device ANSI and Typed text carry on | Colours box, **Regex** |
   | `e` | **Local echo** | Send box |
   | `r` | **Reconnect** — wait for the port after a reset instead of ending the session | Connection box |
+  | `b` | **Buffers** between the window and the prompt | — |
+  | `x` | **XMODEM** between the window and the prompt | — |
   | `w` | Writes the flags as they stand to the settings file | closing the window |
   | `Enter` / `ESC` / `q` / `Ctrl+O` | Leaves the mode | |
   | anything else | Says so and stays open | |
 
   The names match the GUI toolbar, so a flag reads the same in both
   front ends.
+
+  `b` and `x` are the odd two out: they are not on and off but a choice
+  between the window and the prompt, shown as `[gui]`, `[cli]`, or
+  `[auto/gui]` — still on `auto`, and coming out `gui` here. Pressing
+  the key settles the `auto` and flips to the other side, so it always
+  moves away from what the session has been doing. Without tkinter
+  there is nothing to flip to and the key says so.
 
   The device's colours keep being recorded while they are hidden, so
   turning them back on colours the line still being drawn as well as
@@ -325,9 +351,19 @@ confused with device output whatever the colour toggles are set to.
 ### Command buffers
 
 Slots of text you can fire at the device, fifteen to start with.
-**Ctrl+B** in a CLI session, or **Buffers...** in the GUI toolbar, opens
-the same window: editable fields numbered from 1, each with a **Send**
-button. Enter in a field sends that slot.
+**Buffers...** in the GUI toolbar, and **Ctrl+B** in a CLI session on
+Windows, open the same window: editable fields numbered from 1, each
+with a **Send** button. Enter in a field sends that slot.
+
+On Linux the CLI manages the buffers from the terminal instead — see
+[Buffers from the terminal](#buffers-from-the-terminal) below. A Linux
+session is as often as not an ssh session with no display to put a
+window on, and the same slots and the same file are behind both.
+
+That default is only a default. `--buffer-ui gui` asks for the window
+on Linux too, `--buffer-ui cli` asks for the prompt on Windows, and
+`Ctrl+O` `b` swaps them mid-session. `--dialogs NAME` sets the buffers
+and XMODEM together.
 
 A **Slot** box at the bottom with **-** and **+** next to it changes the
 slot count, between 1 and 50. Type a slot number and **-** removes that
@@ -388,8 +424,38 @@ the shape above on the first save. Buffers written before the script was
 renamed (`~/.serial_highligher_buffers.json`) are still read if the new
 file does not exist yet, and move over on the first save.
 
-Without tkinter, or with `--text-transfer`, Ctrl+B lists the slots in the
-terminal and asks for a number to send, or `e N` to edit slot `N`.
+#### Buffers from the terminal
+
+Where `buffer_ui` comes out `cli` — on Linux by default, anywhere with
+`--buffer-ui cli` or `--dialogs cli`, and anywhere tkinter is missing —
+Ctrl+B opens a prompt rather than a window. The slots are listed with
+the three toggles under them, and `buffers>` takes:
+
+| Command | What it does |
+|---|---|
+| `3` or `s 3` | Send slot 3, dressed by the toggles like the window |
+| `e 3 login root` | Write that text straight into slot 3 |
+| `e 3` | Edit slot 3 at a prompt — the current text is shown, Enter keeps it and `-` clears it |
+| `a` / `a 3` | Add an empty slot at the end, or after slot 3 |
+| `d` / `d 3` | Remove the last slot, or slot 3, text and all |
+| `l` | List the slots and toggles again |
+| `f enter` / `f escapes` / `f close` | Flip one toggle |
+| `f` | Show the toggles |
+| `q` | Leave the prompt and go back to the device |
+| `?` | The command list |
+
+The prompt form is the one that keeps the spaces around the text, so a
+command that ends in one still does; the one-line form has already been
+split on them. Every change is written to the buffer file as it is made, the same
+file the window uses, so the two front ends see each other's slots.
+
+With **Close after send** on, the default, a send drops back to the
+device; turn it off with `f close` to fire several in a row. A send
+during an XMODEM transfer is refused, since the port belongs to the
+transfer.
+
+Slot limits are the window's: between 1 and 50, and the last slot cannot
+be removed.
 
 ### Highlight rules
 
@@ -545,7 +611,14 @@ which keeps the open line as a character buffer with a cursor:
 ### XMODEM upload
 
 Press **Ctrl+T** in a CLI session, or click **XMODEM...** in the GUI
-toolbar. Both open the same small window:
+toolbar. In the GUI, and in a CLI session on Windows, that opens a small
+window; on Linux the CLI asks in the terminal instead, the same split
+the buffers use and for the same reason. `--transfer-ui gui` asks for
+the window on Linux too, `--transfer-ui cli` for the prompts on Windows,
+`--dialogs NAME` sets XMODEM and the buffers together, and `Ctrl+O` `x`
+swaps them mid-session.
+
+The window is:
 
 - a file field with **Browse...**
 - the format: **XMODEM-1K (1024 byte blocks)** or **XMODEM-CRC (128 byte
@@ -554,19 +627,22 @@ toolbar. Both open the same small window:
 - **Send**, **Abort**, **Close**
 
 The window keeps the transfer out of the terminal, which otherwise mixes
-device output with progress lines. While it runs, the terminal reader is
-paused so nothing else touches the port; it resumes when the window
-closes.
+device output with progress lines. Either way the terminal reader is
+paused while the transfer runs so nothing else touches the port, and it
+resumes at the end.
 
-An open buffer window stays up but stops sending while the transfer
-window lives, since both write to the same port; its fields grey out and
+The buffers stop sending while a transfer runs, since both write to the
+same port: the terminal manager refuses a send and says so, and an open
+buffer window stays up but goes quiet — its fields grey out and
 say why, the transfer window notes **Buffers disabled** in red, and they
 come back when the transfer window closes. A transfer
 that finishes closes its window on its own after a moment; one that
 fails or is aborted stays up with the reason on it.
 
-From the command line, `--send` opens the same window with the file
-filled in and starts immediately, then drops back into the session:
+From the command line, `--send` starts the transfer as soon as the port
+is open, then drops back into the session. It uses the same front end as
+Ctrl+T: the window opens with the file filled in and sends at once, or
+the transfer runs straight in the terminal with its progress line.
 
 ```
 python serialkit.py -p COM8 --send firmware.bin --xmodem 1k
@@ -584,8 +660,9 @@ The sender waits up to 60 s for the receiver's start character.
 
 #### Without a window
 
-`--text-transfer` (or a Python without tkinter) falls back to prompts in
-the terminal:
+Where `transfer_ui` comes out `cli` — on Linux by default, with
+`--transfer-ui cli`, `--dialogs cli` or the older `--text-transfer`, and
+anywhere tkinter is missing — Ctrl+T and `--send` ask in the terminal:
 
 ```
 --- XMODEM send (ESC or Ctrl+C during transfer aborts) ---

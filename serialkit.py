@@ -4098,6 +4098,22 @@ CONFIG_FILE = os.path.join(
     ".serialkit.json"
 )
 
+# Which front end the buffers and the XMODEM transfer put up when the
+# session is a CLI one. The window is the richer of the two, but it
+# needs a display, and a Linux session is as often as not an ssh
+# session; so "auto" is a window on Windows and a prompt on Linux, and
+# either can be asked for outright on either platform.
+UI_CHOICES = ("auto", "gui", "cli")
+
+
+def ui_choice(value, fallback="auto"):
+    """One of UI_CHOICES out of a settings file, or the fallback."""
+
+    value = str(value).strip().lower() if value is not None else ""
+
+    return value if value in UI_CHOICES else fallback
+
+
 CONFIG_DEFAULTS = {
     "front_end": "gui",          # what runs when neither --cli nor --gui
     "port": None,
@@ -4108,7 +4124,9 @@ CONFIG_DEFAULTS = {
     "input_color": INPUT_COLOR,
     "local_echo": False,
     "xmodem": "1k",
-    "text_transfer": False,
+    "buffer_ui": "auto",         # auto, gui or cli; see UI_CHOICES
+    "transfer_ui": "auto",
+    "text_transfer": False,      # kept for older settings files
     "reconnect": True,
     "highlight": True,
     "rules": [],
@@ -4135,6 +4153,15 @@ def load_config(path=CONFIG_FILE):
 
     except Exception:
         pass
+
+    config["buffer_ui"] = ui_choice(config["buffer_ui"])
+    config["transfer_ui"] = ui_choice(config["transfer_ui"])
+
+    # text_transfer was the older way of saying "no transfer window".
+    # A file that still carries it keeps meaning what it meant, unless
+    # transfer_ui has since been written and says otherwise.
+    if config["text_transfer"] and config["transfer_ui"] == "auto":
+        config["transfer_ui"] = "cli"
 
     return config
 
@@ -4961,6 +4988,8 @@ class SerialCli:
         device_colors=True,
         send_path=None,
         block_size=1024,
+        buffer_ui="auto",
+        transfer_ui="auto",
         text_transfer=False,
         input_color=INPUT_COLOR,
         config_path=CONFIG_FILE,
@@ -4982,7 +5011,18 @@ class SerialCli:
 
         self.send_path = send_path
         self.block_size = block_size
-        self.text_transfer = text_transfer
+
+        # Window or prompt, per feature. text_transfer is the older
+        # --text-transfer, which only ever meant "prompt".
+        self.buffer_ui = ui_choice(buffer_ui)
+        self.transfer_ui = ui_choice(transfer_ui)
+
+        if text_transfer and self.transfer_ui == "auto":
+            self.transfer_ui = "cli"
+
+        # Said once a session, not once a window that cannot open
+        self.warned_no_tk = False
+
         self.config_path = config_path
         self.buffer_path = buffer_file(buffer_path)
 
@@ -5319,8 +5359,13 @@ class SerialCli:
         except Exception:
             return False
 
-    def cooked_input(self, prompt):
-        """Read a line from the user, leaving raw mode while we do."""
+    def cooked_input(self, prompt, strip=True):
+        """
+        Read a line from the user, leaving raw mode while we do.
+
+        strip=False keeps the spaces around the answer, for the places
+        where the answer is text for the device rather than a command.
+        """
 
         if self.raw_fd is not None:
 
@@ -5341,7 +5386,9 @@ class SerialCli:
             sys.stdout.write("\r\x1b[2K" + prompt)
             sys.stdout.flush()
 
-            return sys.stdin.readline().strip()
+            line = sys.stdin.readline()
+
+            return line.strip() if strip else line.rstrip("\r\n")
 
         except (EOFError, KeyboardInterrupt):
             return ""
@@ -5361,7 +5408,7 @@ class SerialCli:
 
     def prompt_transfer(self):
 
-        if TK_AVAILABLE and not self.text_transfer:
+        if self.use_window(self.transfer_ui):
             self.dialog_transfer()
             return
 
@@ -5420,8 +5467,9 @@ class SerialCli:
             "  Ctrl+Y   Typed text colour on/off",
             "  Ctrl+O   flag mode, stays open: t Timestamp,",
             "           d Device ANSI, i Typed text, c Regex highlight,",
-            "           e Local echo, r Reconnect, w write settings,",
-            "           Enter or ESC leaves",
+            "           e Local echo, r Reconnect, b Buffers window or",
+            "           prompt, x XMODEM window or prompt,",
+            "           w write settings, Enter or ESC leaves",
             "  Ctrl+G   this list",
             "  Ctrl+C   goes to the device, it does not quit",
             "  ESC or Ctrl+C aborts a running transfer",
@@ -5434,6 +5482,8 @@ class SerialCli:
             f" {self.input_color or ''}".rstrip(),
             f"  Local echo      e   [{self.on_off(self.local_echo)}]",
             f"  Reconnect       r   [{self.on_off(self.reconnect)}]",
+            f"  Buffers         b   [{self.ui_label(self.buffer_ui)}]",
+            f"  XMODEM          x   [{self.ui_label(self.transfer_ui)}]",
             f"  XMODEM blocks       "
             f"{'1K' if self.block_size == 1024 else '128 byte'}",
             f"  Highlight rules     {len(ACTIVE_RULES)} active"
@@ -5466,6 +5516,8 @@ class SerialCli:
             f"  c   Regex highlight     [{self.on_off(self.highlight)}]",
             f"  e   Local echo          [{self.on_off(self.local_echo)}]",
             f"  r   Reconnect           [{self.on_off(self.reconnect)}]",
+            f"  b   Buffers front end   [{self.ui_label(self.buffer_ui)}]",
+            f"  x   XMODEM front end    [{self.ui_label(self.transfer_ui)}]",
             "  w   write these settings to the settings file",
             "  Enter or ESC closes. Keys go to the device again after"
             " that.",
@@ -5477,6 +5529,39 @@ class SerialCli:
 
         return "on" if value else "off"
 
+    def use_window(self, choice):
+        """
+        Whether a feature should put up a window or ask in the terminal.
+
+        "gui" and "cli" are the answer outright. "auto" is a window on
+        Windows and a prompt on Linux: the terminal session there is as
+        often as not an ssh one with no display to put a window on.
+
+        Nothing opens a window without tkinter, whatever was asked for,
+        so a Python built without it still runs the whole tool.
+        """
+
+        if choice == "cli":
+            return False
+
+        if not TK_AVAILABLE:
+
+            if choice == "gui" and not self.warned_no_tk:
+
+                self.warned_no_tk = True
+
+                self.write_notice(
+                    "[no tkinter in this Python, so the prompts are "
+                    "used instead of the windows]"
+                )
+
+            return False
+
+        if choice == "gui":
+            return True
+
+        return os.name == "nt"
+
     def option_summary(self):
         """One line of state, printed after each flag is flipped."""
 
@@ -5487,6 +5572,8 @@ class SerialCli:
             f"c[{self.on_off(self.highlight)}]",
             f"e[{self.on_off(self.local_echo)}]",
             f"r[{self.on_off(self.reconnect)}]",
+            f"b[{self.ui_label(self.buffer_ui)}]",
+            f"x[{self.ui_label(self.transfer_ui)}]",
         ])
 
     def apply_option(self, char):
@@ -5509,6 +5596,8 @@ class SerialCli:
             "c": self.toggle_highlight,
             "e": self.toggle_local_echo,
             "r": self.toggle_reconnect,
+            "b": self.toggle_buffer_ui,
+            "x": self.toggle_transfer_ui,
             "w": self.write_settings,
         }.get(char.lower())
 
@@ -5574,6 +5663,62 @@ class SerialCli:
             else "[Reconnect off - the session ends if the port is lost]"
         )
 
+    def ui_label(self, choice):
+        """
+        How a front-end setting reads in the menus.
+
+        "auto" is shown with what it comes to here, so the line says
+        which window will actually open.
+        """
+
+        if choice == "auto":
+            return f"auto/{'gui' if self.use_window(choice) else 'cli'}"
+
+        return choice
+
+    def toggle_buffer_ui(self):
+        """Swap the buffers between the window and the prompt."""
+
+        if self.no_windows():
+            return
+
+        self.buffer_ui = self.flip_ui(self.buffer_ui)
+
+        self.write_notice(f"[Buffers: {self.ui_label(self.buffer_ui)}]")
+
+    def toggle_transfer_ui(self):
+        """Swap XMODEM between the window and the prompt."""
+
+        if self.no_windows():
+            return
+
+        self.transfer_ui = self.flip_ui(self.transfer_ui)
+
+        self.write_notice(f"[XMODEM: {self.ui_label(self.transfer_ui)}]")
+
+    def no_windows(self):
+        """True, having said so, when there is no tkinter to swap to."""
+
+        if TK_AVAILABLE:
+            return False
+
+        self.write_notice(
+            "[no tkinter in this Python, so the prompts are the only "
+            "front end there is]"
+        )
+
+        return True
+
+    def flip_ui(self, choice):
+        """
+        The other of gui and cli.
+
+        An "auto" is settled first, so the key flips away from whatever
+        the session has been doing rather than to a fixed side.
+        """
+
+        return "cli" if self.use_window(choice) else "gui"
+
     def write_settings(self):
         """Keep the flags as they stand now for the next session."""
 
@@ -5588,7 +5733,8 @@ class SerialCli:
             "device_colors": self.device_colors,
             "input_color": self.configured_input_color,
             "local_echo": self.local_echo,
-            "text_transfer": self.text_transfer,
+            "buffer_ui": self.buffer_ui,
+            "transfer_ui": self.transfer_ui,
             "xmodem": "128" if self.block_size == 128 else "1k",
             "reconnect": self.reconnect,
             "rule_profile": self.rule_profile,
@@ -5684,8 +5830,15 @@ class SerialCli:
         self.send(data)
 
     def open_buffers(self):
+        """
+        The buffers, in a window or at a prompt.
 
-        if TK_AVAILABLE and not self.text_transfer:
+        Which one is --buffer-ui, and by default the platform: a window
+        on Windows, a prompt on Linux. The two are the same buffers out
+        of the same file, so the choice is only how they are worked on.
+        """
+
+        if self.use_window(self.buffer_ui):
 
             def run_dialog():
                 try:
@@ -5703,57 +5856,262 @@ class SerialCli:
 
         self.text_buffers()
 
+    # The terminal buffer manager's commands, for the prompt and the
+    # help line. A bare number is a send, so the common case is one
+    # keystroke and Enter.
+    BUFFER_COMMANDS = (
+        "N or s N send, e N [text] edit, a [N] add, d [N] del,"
+        " l list, f flags, q quit"
+    )
+
     def text_buffers(self):
-        """Terminal fallback for the buffer window."""
+        """
+        The buffers from the terminal: list, add, edit, delete, send.
+
+        The file is read once and written back after every change, so a
+        session that is killed still leaves the slots as they were last
+        seen.
+        """
 
         items, flags = load_buffers(self.buffer_path)
 
-        self.write_notice("--- Buffers ---")
+        self.write_notice(f"--- Buffers - {self.buffer_path} ---")
+        self.list_buffers(items, flags)
+
+        while True:
+
+            answer = self.cooked_input("buffers> ").strip()
+
+            if not answer:
+                continue
+
+            word, _, rest = answer.partition(" ")
+            word = word.lower()
+            rest = rest.strip()
+
+            if word in ("q", "quit", "x", "exit"):
+                break
+
+            if word in ("l", "list", "ls"):
+                self.list_buffers(items, flags)
+                continue
+
+            if word in ("?", "h", "help"):
+                self.write_notice(f"  {self.BUFFER_COMMANDS}")
+                continue
+
+            if word in ("f", "flags"):
+                self.buffer_flag_command(rest, items, flags)
+                continue
+
+            if word in ("a", "add"):
+                self.buffer_add(rest, items, flags)
+                continue
+
+            if word in ("d", "del", "delete", "rm"):
+                self.buffer_delete(rest, items, flags)
+                continue
+
+            if word in ("e", "edit"):
+                self.buffer_edit(rest, items, flags)
+                continue
+
+            # Everything else is a send, whether or not it was spelled
+            # with the s: "3" and "s 3" are the same request.
+            if word in ("s", "send"):
+                target = rest
+            else:
+                target = answer
+
+            if self.buffer_send(target, items, flags) and flags["close"]:
+                break
+
+    def list_buffers(self, items, flags):
+        """The slots as they stand, and how a send would be dressed."""
 
         for index, text in enumerate(items):
             self.write_notice(f"  {index + 1}: {text or '(empty)'}")
 
-        answer = self.cooked_input(
-            "Slot to send, 'e N' to edit, Enter to cancel: "
-        ).strip()
+        self.write_notice(
+            f"  flags: enter {self.on_off(flags['enter'])},"
+            f" escapes {self.on_off(flags['escapes'])},"
+            f" close {self.on_off(flags['close'])}"
+        )
+        self.write_notice(f"  {self.BUFFER_COMMANDS}")
 
-        if not answer:
-            return
+    def buffer_slot(self, text, items, allow_blank=False):
+        """
+        A slot number from what was typed, or None if it was no good.
 
-        if answer.lower().startswith("e"):
+        A blank is a slot of its own for add and delete, which both have
+        somewhere sensible to go without one; every other command needs
+        a number and says so.
+        """
 
-            try:
-                slot = int(answer[1:].strip() or "-1")
-            except ValueError:
-                slot = -1
-
-            index = self.buffer_index(slot, len(items))
-
-            if index is None:
-                self.write_notice("[No such slot]")
-                return
-
-            items[index] = self.cooked_input(f"Slot {slot} text: ")
-
-            save_buffers(items, flags, self.buffer_path)
-
-            self.write_notice(f"[Slot {slot} saved]")
-            return
-
-        try:
-            index = self.buffer_index(int(answer), len(items))
-        except ValueError:
-            index = None
-
-        if index is None:
-            self.write_notice("[No such slot]")
-            return
-
-        text = items[index]
+        text = text.strip()
 
         if not text:
-            self.write_notice("[Slot is empty]")
+
+            if allow_blank:
+                return "blank"
+
+            self.write_notice("[Which slot? e.g. e 3, or e 3 reboot]")
+            return None
+
+        try:
+            slot = int(text)
+        except ValueError:
+            self.write_notice(f"[Not a slot number: {text}]")
+            return None
+
+        if not 1 <= slot <= len(items):
+            self.write_notice(f"[No slot {slot}, there are {len(items)}]")
+            return None
+
+        return slot
+
+    def store_buffers(self, items, flags, note):
+        """Write the file back and say what changed, or why it did not."""
+
+        if save_buffers(items, flags, self.buffer_path):
+            self.write_notice(f"[{note}]")
+        else:
+            self.write_notice(f"[{note}, but the file could not be written]")
+
+    def buffer_edit(self, rest, items, flags):
+        """
+        Replace one slot's text, in one line or at a prompt.
+
+        "e 1 login root" writes the slot there and then; "e 1" shows
+        what is in it and asks. The prompt is the one that keeps the
+        spaces around the text, since the line here has already been
+        split on them.
+        """
+
+        number, _, inline = rest.partition(" ")
+
+        slot = self.buffer_slot(number, items)
+
+        if slot is None:
             return
+
+        inline = inline.strip()
+
+        if inline:
+            items[slot - 1] = inline
+            self.store_buffers(items, flags, f"Slot {slot} saved")
+            return
+
+        current = items[slot - 1]
+
+        self.write_notice(f"  {slot}: {current or '(empty)'}")
+
+        # Leading and trailing spaces are kept: a command that ends in
+        # one is unusual but it is not ours to throw away.
+        text = self.cooked_input(
+            f"Slot {slot} (Enter keeps it, - clears it): ",
+            strip=False
+        )
+
+        if not text:
+            self.write_notice("[Unchanged]")
+            return
+
+        if text.strip() == "-":
+            items[slot - 1] = ""
+            self.store_buffers(items, flags, f"Slot {slot} cleared")
+            return
+
+        items[slot - 1] = text
+        self.store_buffers(items, flags, f"Slot {slot} saved")
+
+    def buffer_add(self, rest, items, flags):
+        """A new empty slot after the one named, or at the end."""
+
+        if len(items) >= BUFFER_MAX:
+            self.write_notice(f"[{BUFFER_MAX} slots is the limit]")
+            return
+
+        slot = self.buffer_slot(rest, items, allow_blank=True)
+
+        if slot is None:
+            return
+
+        if slot == "blank":
+            items.append("")
+            added = len(items)
+        else:
+            items.insert(slot, "")
+            added = slot + 1
+
+        self.store_buffers(items, flags, f"Slot {added} added")
+
+    def buffer_delete(self, rest, items, flags):
+        """Drop the slot named, or the last one."""
+
+        if len(items) <= BUFFER_MIN:
+            self.write_notice("[The last slot has to stay]")
+            return
+
+        slot = self.buffer_slot(rest, items, allow_blank=True)
+
+        if slot is None:
+            return
+
+        index = len(items) - 1 if slot == "blank" else slot - 1
+
+        dropped = items.pop(index)
+        note = f"Slot {index + 1} removed"
+
+        if dropped:
+            note += ", text and all"
+
+        self.store_buffers(items, flags, note)
+
+    def buffer_flag_command(self, rest, items, flags):
+        """Flip one of the file's toggles, or show them all."""
+
+        name = rest.strip().lower()
+
+        if not name:
+            self.list_buffers(items, flags)
+            return
+
+        for known in BUFFER_FLAG_DEFAULTS:
+
+            if known.startswith(name):
+                flags[known] = not flags[known]
+                self.store_buffers(
+                    items,
+                    flags,
+                    f"{known} {self.on_off(flags[known])}"
+                )
+                return
+
+        self.write_notice(
+            f"[No such flag: {name}."
+            f" Try {', '.join(BUFFER_FLAG_DEFAULTS)}]"
+        )
+
+    def buffer_send(self, rest, items, flags):
+        """Send one slot to the device. True if something went out."""
+
+        # A transfer owns the port, so a buffer sent mid-XMODEM would
+        # land in the middle of a block.
+        if buffers_locked():
+            self.write_notice("[A transfer is running, nothing sent]")
+            return False
+
+        slot = self.buffer_slot(rest, items)
+
+        if slot is None:
+            return False
+
+        text = items[slot - 1]
+
+        if not text:
+            self.write_notice(f"[Slot {slot} is empty]")
+            return False
 
         # The file's own toggles hold here too
         if flags["escapes"]:
@@ -5763,6 +6121,7 @@ class SerialCli:
             text += "\r\n"
 
         self.send_typed(text.encode("utf-8"))
+        return True
 
     @staticmethod
     def buffer_index(slot, count):
@@ -5843,6 +6202,13 @@ class SerialCli:
 
         self.pause_reader.set()
 
+        # A buffer window can be open while the transfer itself runs in
+        # the terminal, and both write to the same port, so the window
+        # is stopped for the length of the transfer exactly as the
+        # transfer window stops it.
+        if lock_buffer_dialogs():
+            self.write_notice("--- buffer window disabled for XMODEM ---")
+
         # Let a read() already in flight finish before taking the port
         time.sleep(0.3)
 
@@ -5861,6 +6227,7 @@ class SerialCli:
             self.transfer_status(f"XMODEM: error: {e}")
 
         finally:
+            unlock_buffer_dialogs()
             self.pause_reader.clear()
 
     # --------------------------------------------------------
@@ -6063,7 +6430,7 @@ class SerialCli:
 
         if path:
 
-            if TK_AVAILABLE and not self.text_transfer:
+            if self.use_window(self.transfer_ui):
                 self.dialog_transfer(initial_path=path, autostart=True)
             else:
                 self.send_file(path, self.block_size)
@@ -6311,7 +6678,8 @@ def run_cli(args):
         device_colors=args.device_colors,
         send_path=args.send,
         block_size=128 if args.xmodem == "128" else 1024,
-        text_transfer=args.text_transfer,
+        buffer_ui=args.buffer_ui,
+        transfer_ui=args.transfer_ui,
         input_color=args.input_color,
         config_path=args.config,
         buffer_path=args.buffers,
@@ -6342,6 +6710,9 @@ CLI_ONLY_DESTS = {
     "input_color",
     "local_echo",
     "send",
+    "dialogs",
+    "buffer_ui",
+    "transfer_ui",
     "text_transfer",
     "reconnect",
     "highlight",
@@ -6578,12 +6949,42 @@ def parse_args(argv=None):
         help="end the session as soon as the port is lost (CLI only)"
     )
 
+    # The buffers and the transfer each have a window and a prompt.
+    # Neither is the poor relation: the window is easier to read, the
+    # prompt is the one that works over ssh with no display.
+    parser.add_argument(
+        "--dialogs",
+        choices=UI_CHOICES,
+        default=None,
+        help="front end for both the buffers and XMODEM: gui for "
+             "windows, cli for terminal prompts, auto for a window on "
+             "Windows and a prompt on Linux. Shorthand for both of the "
+             "next two (CLI only)"
+    )
+
+    parser.add_argument(
+        "--buffer-ui",
+        dest="buffer_ui",
+        choices=UI_CHOICES,
+        default=config["buffer_ui"],
+        help=f"front end for Ctrl+B, the command buffers "
+             f"(default {config['buffer_ui']}, CLI only)"
+    )
+
+    parser.add_argument(
+        "--transfer-ui",
+        dest="transfer_ui",
+        choices=UI_CHOICES,
+        default=config["transfer_ui"],
+        help=f"front end for Ctrl+T and --send, the XMODEM transfer "
+             f"(default {config['transfer_ui']}, CLI only)"
+    )
+
     parser.add_argument(
         "--text-transfer",
         action="store_true",
         default=config["text_transfer"],
-        help="run XMODEM transfers as terminal prompts instead of "
-             "opening the transfer window (CLI only)"
+        help="the older way of writing --transfer-ui cli (CLI only)"
     )
 
     parser.add_argument(
@@ -6605,6 +7006,20 @@ def parse_args(argv=None):
 
     args.config_values = config
     args.typed = typed_options(parser, argv)
+
+    # --dialogs is the shorthand, so the named one wins where both
+    # appear and neither disturbs a settings file that has its own.
+    if args.dialogs:
+
+        if "buffer_ui" not in args.typed:
+            args.buffer_ui = args.dialogs
+
+        if "transfer_ui" not in args.typed:
+            args.transfer_ui = args.dialogs
+
+    # --text-transfer stays the older spelling of --transfer-ui cli
+    if args.text_transfer and "transfer_ui" not in args.typed:
+        args.transfer_ui = "cli"
 
     return args
 
@@ -6640,7 +7055,11 @@ def config_from_args(args):
         "input_color": args.input_color,
         "local_echo": args.local_echo,
         "xmodem": args.xmodem,
-        "text_transfer": args.text_transfer,
+        "buffer_ui": args.buffer_ui,
+        "transfer_ui": args.transfer_ui,
+        # Written out as the two above, so the older key is not carried
+        # forward to argue with them
+        "text_transfer": False,
         "reconnect": args.reconnect,
         "highlight": args.highlight,
         "rule_profile": args.rule_profile,
