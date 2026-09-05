@@ -4967,7 +4967,10 @@ class SerialCli:
 
     QUIT_KEY = "\x1d"          # Ctrl+]
     SEND_KEY = "\x14"          # Ctrl+T, start an XMODEM upload
-    BUFFER_KEY = "\x02"        # Ctrl+B, open the command buffers
+    # Ctrl+N opens the command buffers. Ctrl+B did the job first and
+    # still does, but tmux keeps that one for itself, so a session
+    # under tmux never sees it.
+    BUFFER_KEYS = ("\x0e", "\x02")
     INPUT_COLOR_KEY = "\x19"   # Ctrl+Y, turn the input colour on or off
     RULES_KEY = "\x12"         # Ctrl+R, open the highlight rules
 
@@ -5359,12 +5362,18 @@ class SerialCli:
         except Exception:
             return False
 
-    def cooked_input(self, prompt, strip=True):
+    def cooked_input(self, prompt, strip=True, preset="", cancel=""):
         """
         Read a line from the user, leaving raw mode while we do.
 
         strip=False keeps the spaces around the answer, for the places
         where the answer is text for the device rather than a command.
+
+        preset puts text on the line already, ready to be edited, so a
+        slot that needs one character changed does not have to be typed
+        out again. cancel is what comes back when the question is given
+        up on, which is how an empty answer is told apart from no
+        answer at all.
         """
 
         if self.raw_fd is not None:
@@ -5383,15 +5392,27 @@ class SerialCli:
 
         try:
 
-            sys.stdout.write("\r\x1b[2K" + prompt)
+            sys.stdout.write("\r\x1b[2K")
             sys.stdout.flush()
 
-            line = sys.stdin.readline()
+            if preset:
+                line = self.preset_input(prompt, preset)
+            else:
+
+                sys.stdout.write(prompt)
+                sys.stdout.flush()
+
+                line = sys.stdin.readline()
+
+            # Only the preset editors say "given up on" this way; a
+            # plain read says it by raising instead.
+            if line is None:
+                return cancel
 
             return line.strip() if strip else line.rstrip("\r\n")
 
         except (EOFError, KeyboardInterrupt):
-            return ""
+            return cancel
 
         finally:
 
@@ -5405,6 +5426,136 @@ class SerialCli:
                 tty.setraw(self.raw_fd)
 
             self.hold_console()
+
+    # What the keys behind a \x00 / \xe0 prefix do while a preset line
+    # is being edited. msvcrt hands them over as a prefix and a letter.
+    WINDOWS_EDIT_KEYS = {
+        "K": "left",
+        "M": "right",
+        "G": "home",
+        "O": "end",
+        "S": "delete",
+    }
+
+    def preset_input(self, prompt, preset):
+        """
+        A line that starts out with text in it, ready to be edited.
+
+        None comes back if the question was given up on. Windows gets a
+        small editor of its own because msvcrt brings no readline; every
+        other platform hands the job to readline, which puts the text on
+        the line through its pre-input hook and then edits it as usual.
+        """
+
+        if os.name == "nt":
+            return self.windows_preset_input(prompt, preset)
+
+        try:
+            import readline
+        except ImportError:
+
+            # Without readline the text can only be shown, not edited,
+            # so at least it is there to be copied or retyped from.
+            sys.stdout.write(f"  {preset}\r\n")
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+
+            return sys.stdin.readline()
+
+        def put_preset():
+            readline.insert_text(preset)
+            readline.redisplay()
+
+        readline.set_pre_input_hook(put_preset)
+
+        try:
+            return input(prompt)
+        finally:
+            readline.set_pre_input_hook(None)
+
+    def windows_preset_input(self, prompt, preset):
+        """
+        The one line editor Windows uses, where readline is not there.
+
+        Printable keys, Backspace, Delete, the arrows, Home, End and
+        Ctrl+U. Enter takes the line, Esc and Ctrl+C give it up.
+        """
+
+        import msvcrt
+
+        text = list(preset)
+        pos = len(text)
+
+        def redraw():
+
+            sys.stdout.write("\r\x1b[2K" + prompt + "".join(text))
+
+            trailing = len(text) - pos
+
+            if trailing:
+                sys.stdout.write(f"\x1b[{trailing}D")
+
+            sys.stdout.flush()
+
+        redraw()
+
+        while True:
+
+            try:
+                key = msvcrt.getwch()
+            except KeyboardInterrupt:
+                return None
+
+            if key in ("\r", "\n"):
+                return "".join(text)
+
+            if key in ("\x03", "\x1b"):
+                return None
+
+            if key in ("\x00", "\xe0"):
+
+                action = self.WINDOWS_EDIT_KEYS.get(msvcrt.getwch())
+
+                if action == "left" and pos:
+                    pos -= 1
+                elif action == "right" and pos < len(text):
+                    pos += 1
+                elif action == "home":
+                    pos = 0
+                elif action == "end":
+                    pos = len(text)
+                elif action == "delete" and pos < len(text):
+                    del text[pos]
+                else:
+                    continue
+
+                redraw()
+                continue
+
+            if key in ("\x08", "\x7f"):
+
+                if pos:
+                    pos -= 1
+                    del text[pos]
+                    redraw()
+
+                continue
+
+            if key == "\x15":       # Ctrl+U, clear the whole line
+
+                text = []
+                pos = 0
+                redraw()
+                continue
+
+            # Anything else below space is a control key we have no use
+            # for here, so it is dropped rather than typed.
+            if key < " ":
+                continue
+
+            text.insert(pos, key)
+            pos += 1
+            redraw()
 
     def prompt_transfer(self):
 
@@ -5462,7 +5613,7 @@ class SerialCli:
             f"--- {PROGRAM} keys ---",
             "  Ctrl+]   quit",
             "  Ctrl+T   send a file with XMODEM",
-            "  Ctrl+B   command buffers",
+            "  Ctrl+N   command buffers (Ctrl+B too, outside tmux)",
             "  Ctrl+R   highlight rules",
             "  Ctrl+Y   Typed text colour on/off",
             "  Ctrl+O   flag mode, stays open: t Timestamp,",
@@ -5982,10 +6133,11 @@ class SerialCli:
         """
         Replace one slot's text, in one line or at a prompt.
 
-        "e 1 login root" writes the slot there and then; "e 1" shows
-        what is in it and asks. The prompt is the one that keeps the
-        spaces around the text, since the line here has already been
-        split on them.
+        "e 1 login root" writes the slot there and then; "e 1" puts
+        what is in the slot on the line to be edited, so a command that
+        needs one character changed is not typed out again. The prompt
+        is the one that keeps the spaces around the text, since the line
+        here has already been split on them.
         """
 
         number, _, inline = rest.partition(" ")
@@ -6004,20 +6156,23 @@ class SerialCli:
 
         current = items[slot - 1]
 
-        self.write_notice(f"  {slot}: {current or '(empty)'}")
+        if not current:
+            self.write_notice(f"  {slot}: (empty)")
 
         # Leading and trailing spaces are kept: a command that ends in
         # one is unusual but it is not ours to throw away.
         text = self.cooked_input(
-            f"Slot {slot} (Enter keeps it, - clears it): ",
-            strip=False
+            f"Slot {slot} (Enter saves, Ctrl+C keeps it): ",
+            strip=False,
+            preset=current,
+            cancel=None
         )
 
-        if not text:
+        if text is None:
             self.write_notice("[Unchanged]")
             return
 
-        if text.strip() == "-":
+        if not text:
             items[slot - 1] = ""
             self.store_buffers(items, flags, f"Slot {slot} cleared")
             return
@@ -6252,7 +6407,7 @@ class SerialCli:
         )
 
         # A named buffer file that is not there yet is made now, so
-        # Ctrl+B has somewhere to save to.
+        # Ctrl+N has somewhere to save to.
         created = ensure_buffer_file(self.buffer_path)
 
         if created:
@@ -6359,7 +6514,7 @@ class SerialCli:
                 transfer = True
                 break
 
-            if char == self.BUFFER_KEY:
+            if char in self.BUFFER_KEYS:
                 buffers = True
                 break
 
@@ -6967,7 +7122,7 @@ def parse_args(argv=None):
         dest="buffer_ui",
         choices=UI_CHOICES,
         default=config["buffer_ui"],
-        help=f"front end for Ctrl+B, the command buffers "
+        help=f"front end for Ctrl+N, the command buffers "
              f"(default {config['buffer_ui']}, CLI only)"
     )
 

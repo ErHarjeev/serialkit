@@ -89,7 +89,7 @@ for a machine with no tkinter, and for scripting a transfer with
 | `--reconnect` | Wait for the port and carry on when the device is reset or power cycled (default, CLI only) |
 | `--no-reconnect` | End the session as soon as the port is lost (CLI only) |
 | `--dialogs {auto,gui,cli}` | Front end for both the buffers and XMODEM: windows, terminal prompts, or `auto` — a window on Windows, a prompt on Linux (CLI only) |
-| `--buffer-ui {auto,gui,cli}` | Front end for Ctrl+B alone, default `auto` (CLI only) |
+| `--buffer-ui {auto,gui,cli}` | Front end for Ctrl+N alone, default `auto` (CLI only) |
 | `--transfer-ui {auto,gui,cli}` | Front end for Ctrl+T and `--send` alone, default `auto` (CLI only) |
 | `--text-transfer` | The older spelling of `--transfer-ui cli` (CLI only) |
 | `--config FILE` | Settings file to read, default `~/.serialkit.json` |
@@ -166,7 +166,7 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   `~/.serialkit_buffers.json`; `--buffers FILE` overrides it for a run.
   Only the path lives here: the slots, their count and the window's
   toggles all live in that file.
-- `buffer_ui` and `transfer_ui` say whether Ctrl+B and Ctrl+T put up a
+- `buffer_ui` and `transfer_ui` say whether Ctrl+N and Ctrl+T put up a
   window or ask in the terminal: `gui`, `cli`, or `auto` for a window
   on Windows and a prompt on Linux. `--dialogs NAME` sets both for a
   run, `--buffer-ui` and `--transfer-ui` set one each, and `Ctrl+O` `b`
@@ -219,7 +219,7 @@ python serialkit.py -p COM8 -b 921600 -t --strip-device-colors --save-config
   | --- | --- |
   | `Ctrl+]` | Quit |
   | `Ctrl+T` | Send a file with XMODEM — a window or a prompt, see `--transfer-ui` |
-  | `Ctrl+B` | Command buffers — a window or a prompt, see `--buffer-ui` |
+  | `Ctrl+N` | Command buffers — a window or a prompt, see `--buffer-ui`. Ctrl+B does the same, except under tmux, which keeps that key |
   | `Ctrl+R` | Highlight rules |
   | `Ctrl+Y` | Typed text colour on/off |
   | `Ctrl+O` | Flag mode: toggle as many as you like, `b` and `x` among them — see below |
@@ -351,7 +351,7 @@ confused with device output whatever the colour toggles are set to.
 ### Command buffers
 
 Slots of text you can fire at the device, fifteen to start with.
-**Buffers...** in the GUI toolbar, and **Ctrl+B** in a CLI session on
+**Buffers...** in the GUI toolbar, and **Ctrl+N** in a CLI session on
 Windows, open the same window: editable fields numbered from 1, each
 with a **Send** button. Enter in a field sends that slot.
 
@@ -428,14 +428,14 @@ file does not exist yet, and move over on the first save.
 
 Where `buffer_ui` comes out `cli` — on Linux by default, anywhere with
 `--buffer-ui cli` or `--dialogs cli`, and anywhere tkinter is missing —
-Ctrl+B opens a prompt rather than a window. The slots are listed with
+Ctrl+N opens a prompt rather than a window. The slots are listed with
 the three toggles under them, and `buffers>` takes:
 
 | Command | What it does |
 |---|---|
 | `3` or `s 3` | Send slot 3, dressed by the toggles like the window |
 | `e 3 login root` | Write that text straight into slot 3 |
-| `e 3` | Edit slot 3 at a prompt — the current text is shown, Enter keeps it and `-` clears it |
+| `e 3` | Edit slot 3 at a prompt — the current text is put on the line ready to change, Enter saves it, an empty line clears the slot, Ctrl+C keeps it as it was |
 | `a` / `a 3` | Add an empty slot at the end, or after slot 3 |
 | `d` / `d 3` | Remove the last slot, or slot 3, text and all |
 | `l` | List the slots and toggles again |
